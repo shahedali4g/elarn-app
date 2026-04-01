@@ -1,0 +1,81 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  - group: AKS-Config   # <-- Link your variable group here
+  TAG: $(Build.BuildId)
+
+stages:
+- stage: BuildAndPush
+  displayName: "Build Docker Image and Push to ACR"
+  jobs:
+  - job: Build
+    displayName: "Build & Push Docker Image"
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: Checkout@1
+
+    # Login to ACR
+    - task: AzureCLI@2
+      displayName: 'Login to ACR'
+      inputs:
+        azureSubscription: 'unicsolutions'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az acr login --name $(ACR_NAME)
+
+    # Build Docker Image
+    - script: |
+        docker build -t $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(TAG) .
+      displayName: 'Build Docker Image'
+
+    # Push Docker Image to ACR
+    - script: |
+        docker push $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(TAG)
+      displayName: 'Push Docker Image to ACR'
+
+- stage: DeployToAKS
+  displayName: "Deploy to AKS"
+  dependsOn: BuildAndPush
+  jobs:
+  - job: Deploy
+    displayName: "Deploy React App on AKS"
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Get secrets from Key Vault
+    - task: AzureKeyVault@2
+      name: FetchSecrets
+      inputs:
+        azureSubscription: 'unicsolutions'
+        KeyVaultName: $(KEYVAULT_NAME)
+        SecretsFilter: '*'   # Or specify only the secrets you need
+        RunAsPreJob: true
+
+    # Get AKS credentials
+    - task: AzureCLI@2
+      displayName: 'Get AKS credentials'
+      inputs:
+        azureSubscription: 'unicsolutions'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az aks get-credentials \
+            --resource-group $(AKS_RESOURCE_GROUP) \
+            --name $(AKS_CLUSTER_NAME) \
+            --overwrite-existing
+
+    # Apply Kubernetes manifests
+    - task: Kubernetes@1
+      displayName: 'Deploy React App'
+      inputs:
+        connectionType: 'KubernetesServiceConnection'
+        kubernetesServiceEndpoint: 'unicsolutions'
+        namespace: default
+        command: apply
+        useConfigurationFile: true
+        configuration: k8s/deployment.yaml
