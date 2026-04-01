@@ -3,18 +3,32 @@ trigger:
     include:
       - main
 
+parameters:
+  - name: Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - staging
+      - prod
+  - name: namespace
+    type: string
+    default: default
+    values:
+      - elearn-ui
+      - elearn-backend
+      
 variables:
-  - group: AKS-Config   # <-- Link your variable group here
-  TAG: $(Build.BuildId)
-
+  - group: AKS-Config-{{ parameters.Environment }} # <-- Link your variable group here
+    TAG: $(Build.BuildId)
+ 
 stages:
 - stage: BuildAndPush
   displayName: "Build Docker Image and Push to ACR"
   jobs:
   - job: Build
     displayName: "Build & Push Docker Image"
-    pool:
-      vmImage: 'ubuntu-latest'
+    pool: todo-app-infra
     steps:
     - task: Checkout@1
 
@@ -26,7 +40,7 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          az acr login --name $(ACR_NAME)
+          az acr login --name $(ACR_NAME)   #varible group
 
     # Build Docker Image
     - script: |
@@ -41,41 +55,22 @@ stages:
 - stage: DeployToAKS
   displayName: "Deploy to AKS"
   dependsOn: BuildAndPush
-  jobs:
-  - job: Deploy
-    displayName: "Deploy React App on AKS"
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    # Get secrets from Key Vault
-    - task: AzureKeyVault@2
-      name: FetchSecrets
-      inputs:
-        azureSubscription: 'unicsolutions'
-        KeyVaultName: $(KEYVAULT_NAME)
-        SecretsFilter: '*'   # Or specify only the secrets you need
-        RunAsPreJob: true
-
-    # Get AKS credentials
-    - task: AzureCLI@2
-      displayName: 'Get AKS credentials'
-      inputs:
-        azureSubscription: 'unicsolutions'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          az aks get-credentials \
-            --resource-group $(AKS_RESOURCE_GROUP) \
-            --name $(AKS_CLUSTER_NAME) \
-            --overwrite-existing
-
-    # Apply Kubernetes manifests
-    - task: Kubernetes@1
-      displayName: 'Deploy React App'
-      inputs:
-        connectionType: 'KubernetesServiceConnection'
-        kubernetesServiceEndpoint: 'unicsolutions'
-        namespace: default
-        command: apply
-        useConfigurationFile: true
-        configuration: k8s/deployment.yaml
+  jobs:  
+  - deployment: DeployToAKS
+    displayName: 'Deploying to AKS'
+    environment: 
+      name: {{ parameters.Environment }} 
+      resourceType: Kubernetes
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: KubernetesManifest@1
+            displayName: Deploy to AKS
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: 'aks-service-connection'
+              namespace: {{ parameters.namespace }} # deployment in multiple environment throguh this parameter
+              manifests: |
+                manifests/deployment.yaml
+                manifests/service.yaml
